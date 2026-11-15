@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from src.repositories.database import Database
 from src.repositories.idempotency_repository import IdempotencyRepository
 from src.repositories.transaction_repository import TransactionRepository
 from src.services.gateways import AntiFraudGateway, RegistryService, RegistryStatus
+
+logger = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 
@@ -215,7 +218,11 @@ class WalletService:
             "currency": "BRL",
             "occurred_at": transfer.created_at.isoformat(),
         }
-        self._antifraud.notify_transfer(payload)
+        try:
+            self._antifraud.notify_transfer(payload)
+        except Exception:
+            # A transferência já foi efetivada: falha no gateway não pode desfazê-la.
+            logger.exception("Falha ao notificar anti-fraude para transfer %s", transfer.id)
 
 
 def _hash_request(source_id: str, destination_id: str, amount_cents: int) -> str:
