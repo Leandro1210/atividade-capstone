@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "feature/**", "release/**", "hotfix/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.14"
+  MIN_LINE_COVERAGE: "85"
+  MIN_BRANCH_COVERAGE: "80"
+
+defaults:
+  run:
+    shell: bash # habilita -eo pipefail: falhas no meio de um pipe "| tee" quebram o job
+
+jobs:
+  lint:
+    name: Lint & análise estática
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Instalar dependências
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff (lint)
+        run: ruff check . --output-format=github
+
+      - name: Ruff (formatação)
+        run: ruff format --check .
+
+  tests:
+    name: Testes & coverage gate
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Instalar dependências
+        run: pip install -r requirements-dev.txt && mkdir -p reports/logs
+
+      - name: Testes unitários
+        run: |
+          pytest tests/unit -m unit --cov --cov-report= \
+            --junitxml=reports/junit-unit.xml | tee reports/logs/unit.log
+
+      - name: Testes de integração
+        run: |
+          pytest tests/integration -m integration --cov --cov-append --cov-report= \
+            --junitxml=reports/junit-integration.xml | tee reports/logs/integration.log
+
+      - name: Testes E2E
+        run: |
+          pytest tests/e2e -m e2e --cov --cov-append --cov-report= \
+            --junitxml=reports/junit-e2e.xml | tee reports/logs/e2e.log
+
+      - name: Relatórios de cobertura
+        if: always()
+        run: |
+          coverage report | tee reports/logs/coverage.log
+          coverage xml
+          coverage html
+          coverage json
+
+      - name: Coverage gate (linhas >= 85%, branches >= 80%)
+        run: |
+          python scripts/check_coverage.py reports/coverage.json \
+            --lines "$MIN_LINE_COVERAGE" --branches "$MIN_BRANCH_COVERAGE" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar relatório de cobertura e logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            reports/coverage.xml
+            reports/coverage.json
+            reports/coverage-html/
+            reports/junit-*.xml
+            reports/logs/
+          retention-days: 14
