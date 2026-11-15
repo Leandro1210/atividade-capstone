@@ -345,3 +345,33 @@ make coverage-gate        # testes + relatórios em reports/ + gate
 uvicorn src.main:app      # em outro terminal
 make load                 # teste de carga (50 usuários, 60 s)
 ```
+
+## 11. Histórico de correções emergenciais (hotfixes)
+
+Ambas seguiram o fluxo Git Flow: branch `hotfix/*` criada a partir de `main`, PR
+validado pelo CI, merge em `main` com nova tag e merge de volta em `develop`.
+
+### Hotfix 1.0.1 — falha no gateway anti-fraude quebrava a transferência
+
+- **Branch:** `hotfix/1.0.1-antifraude-resiliencia` → tag `v1.0.1`
+- **Sintoma:** quando o webhook anti-fraude ficava indisponível (timeout/5xx), a
+  exceção subia até a API, que respondia `500` — **mas o dinheiro já tinha sido
+  movimentado**, pois a notificação ocorre após o commit. O cliente, vendo erro,
+  repetia a requisição e (sem `Idempotency-Key`) gerava transferência duplicada.
+- **Correção:** a notificação passou a ser *best-effort*: exceções do gateway são
+  capturadas e registradas em log (RN06/RNF08).
+- **Teste de regressão:** `tests/integration/test_antifraud_resilience.py` — o Mock é
+  configurado com `side_effect = httpx.ConnectTimeout(...)` e o teste verifica que a
+  transferência é efetivada, que o gateway foi chamado uma vez e que o erro foi logado.
+
+### Hotfix 1.0.2 — extrato ignorava lançamentos do dia `end_date`
+
+- **Branch:** `hotfix/1.0.2-extrato-end-date` → tag `v1.0.2`
+- **Sintoma:** o filtro `end_date=2026-03-20` era convertido em `< 2026-03-20T00:00`,
+  excluindo todos os lançamentos do próprio dia 20 (o requisito RF09 define o período
+  como inclusivo).
+- **Correção:** o limite superior passou a ser exclusivo no **dia seguinte**
+  (`< end_date + 1 dia`), formando um intervalo semiaberto `[start, end + 1)`.
+- **Testes de regressão:** `tests/integration/test_statement_end_date_regression.py` —
+  lançamento às 23:59:59 do dia `end_date` é incluído; lançamento à 00:00 do dia
+  seguinte é excluído.

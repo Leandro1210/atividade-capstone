@@ -6,7 +6,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 from src.domain.document import normalize_document
@@ -173,7 +173,9 @@ class WalletService:
             raise InvalidPeriodError("start_date não pode ser posterior a end_date")
 
         start = datetime.combine(start_date, time.min, UTC) if start_date else None
-        end_exclusive = datetime.combine(end_date, time.min, UTC) if end_date else None
+        end_exclusive = (
+            datetime.combine(end_date + timedelta(days=1), time.min, UTC) if end_date else None
+        )
 
         with self._db.read() as conn:
             account = self._require_account(conn, account_id)
