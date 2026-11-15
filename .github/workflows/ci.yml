@@ -102,3 +102,48 @@ jobs:
             reports/junit-*.xml
             reports/logs/
           retention-days: 14
+
+  load-test:
+    name: Teste de carga (50 usuários)
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Instalar dependências
+        run: pip install -r requirements-dev.txt && mkdir -p reports/load
+
+      - name: Subir a API
+        run: |
+          nohup uvicorn src.main:app --host 127.0.0.1 --port 8000 > reports/load/api.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/health && exit 0
+            sleep 1
+          done
+          echo "API não respondeu ao health check" && exit 1
+
+      - name: Locust — 50 usuários simultâneos em /transfers
+        run: |
+          locust -f tests/load/locustfile.py --headless -u 50 -r 50 -t 30s \
+            --host http://127.0.0.1:8000 --csv reports/load/wallet --only-summary \
+            2>&1 | tee reports/load/locust.log
+
+      - name: Taxa de erro e latência
+        run: |
+          echo "## Teste de carga — /transfers" >> "$GITHUB_STEP_SUMMARY"
+          python scripts/load_report.py reports/load/wallet_stats.csv --max-error-rate 1.0 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar resultados do teste de carga
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-report
+          path: reports/load/
+          retention-days: 14
