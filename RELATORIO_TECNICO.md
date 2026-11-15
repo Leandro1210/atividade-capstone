@@ -212,3 +212,136 @@ gitGraph
 | `ci` | Pipeline |
 | `docs` | Documentação |
 | `chore` | Configuração e manutenção |
+
+## 6. Estratégia de testes
+
+### 6.1 Pirâmide de testes
+
+| Camada | Pasta | Testes | O que valida | Dependências reais |
+|---|---|---:|---|---|
+| Unitários | `tests/unit` | 52 | Regras puras de transferência, dinheiro, CPF, configuração e o próprio coverage gate | Nenhuma |
+| Integração | `tests/integration` | 46 | Casos de uso com SQLite em memória, Mocks e Stubs; concorrência; adaptadores | SQLite `:memory:` |
+| E2E | `tests/e2e` | 22 | Fluxo completo via HTTP: registro → transferência → extrato; contrato de erros | App completa (TestClient e Uvicorn em socket real) |
+
+A base é mais larga (testes rápidos e isolados) e o topo mais estreito (testes mais
+caros, focados em fluxos de negócio). A suíte completa executa em ~2 segundos.
+
+### 6.2 TDD — ciclo Red → Green → Refactor
+
+As regras financeiras foram desenvolvidas com TDD, e o ciclo fica registrado no
+histórico do Git (`git log --oneline -- src/domain tests/unit`):
+
+| Fase | Commit | Estado da suíte |
+|---|---|---|
+| 🔴 Red | `test(domain): especifica regras de transferência (red)` | Testes falham (`NotImplementedError`) |
+| 🟢 Green | `feat(domain): implementa cálculo de transferência (green)` | Testes passam com a implementação mais simples |
+| 🔵 Refactor | `refactor(domain): extrai validações em funções guardiãs` | Testes continuam passando; código mais legível |
+| 🔴 Red | `test(domain): especifica conversão monetária e validação de CPF (red)` | Testes falham |
+| 🟢 Green | `feat(domain): implementa conversão monetária e validação de CPF (green)` | Testes passam |
+| 🔴 Red | `test(services): especifica casos de uso com mocks, stubs e SQLite (red)` | Testes falham (serviço inexistente) |
+| 🟢 Green | `feat(services): implementa casos de uso da carteira (green)` | Testes passam |
+
+Qualidade das asserções: os testes verificam **valores exatos** (saldos em centavos,
+corpo JSON completo, ordem dos lançamentos), **efeitos colaterais ausentes** (saldo
+inalterado após falha, nenhuma notificação em erro) e **invariantes** (conservação do
+total de dinheiro entre contas, saldo nunca negativo).
+
+### 6.3 Test doubles
+
+| Double | Onde | Papel | Exemplo de verificação |
+|---|---|---|---|
+| **Mock** | `make_antifraud_mock()` — `create_autospec(HttpAntiFraudGateway, spec_set=True)` | Verificar **interações de saída** com o gateway anti-fraude | `assert_called_once_with({...payload exato...})`, `call_count == 3`, `assert_not_called()` em falhas e replays |
+| **Stub** | `StubRegistryService` | Prover **dados de entrada fixos** de validação cadastral | Retorna `IRREGULAR`/`NOT_FOUND` para um CPF e `REGULAR` para outro; o teste verifica o *comportamento do serviço*, nunca o stub |
+| **Fake** | `FakeClock` | Relógio controlável para filtros de data | `clock.set(datetime(2026, 1, 11, 9, 0))` |
+| **BD em memória** | `Database(":memory:")` | Persistência real e isolada por teste | Saldos, constraints e rollback verificados no banco |
+
+A distinção é deliberada: o **Mock** é usado onde o resultado observável é a *chamada*
+para fora (o gateway não retorna nada útil), e o **Stub** onde o colaborador apenas
+*alimenta* o sistema com dados. O `autospec` faz o teste falhar se a assinatura do
+gateway real mudar.
+
+## 7. Pipeline de Integração Contínua
+
+Arquivo: `.github/workflows/ci.yml`.
+
+| Gatilho | Branches |
+|---|---|
+| `push` | `main`, `develop`, `feature/**`, `release/**`, `hotfix/**` |
+| `pull_request` | para `main` e `develop` |
+
+```mermaid
+flowchart LR
+    A[lint<br/>Ruff check + format] --> B[tests<br/>unit → integration → e2e]
+    B --> C[coverage gate<br/>linhas ≥ 85% · branches ≥ 80%]
+    C --> D[load-test<br/>Locust 50 usuários]
+    B -. artefato .-> E[(coverage-report<br/>HTML, XML, JSON, JUnit, logs)]
+    D -. artefato .-> F[(load-test-report<br/>CSV + logs)]
+```
+
+- **Lint/análise estática:** `ruff check` (regras E, F, W, I, B, UP, SIM, C4, PT, RUF) e
+  `ruff format --check`.
+- **Testes:** cada camada roda em um passo separado (falha localizada), acumulando a
+  cobertura com `--cov-append`. Logs de cada passo são gravados em `reports/logs/`.
+- **Coverage gate:** `scripts/check_coverage.py` lê o `coverage.json` e verifica **linhas
+  e branches separadamente** (o `--cov-fail-under` nativo só checa um total combinado).
+  Se qualquer métrica ficar abaixo do mínimo, o job falha com exit code 1.
+- **Artefatos:** relatório de cobertura (HTML/XML/JSON), resultados JUnit, logs e CSVs do
+  teste de carga são publicados com `actions/upload-artifact` (retenção de 14 dias),
+  inclusive quando o job falha (`if: always()`).
+- **Bloqueio de merge:** com as regras de proteção da seção 5.2, um PR com qualquer job
+  vermelho não pode ser mesclado.
+
+## 8. Cobertura de código
+
+Resultado da suíte completa (120 testes):
+
+| Métrica | Resultado | Mínimo exigido |
+|---|---:|---:|
+| Linhas / statements | **99,77%** (435/436) | 85% |
+| Branches | **96,15%** (50/52) | 80% |
+
+## 9. Desempenho e resiliência
+
+### 9.1 Configuração do teste de carga
+
+- **Ferramenta:** Locust (`tests/load/locustfile.py`).
+- **Concorrência:** **50 usuários virtuais simultâneos** (`-u 50 -r 50`), espera de
+  50–200 ms entre requisições.
+- **Cenário:** cada usuário cria duas contas próprias e dispara transferências com
+  `Idempotency-Key` única. 25% das requisições usam um **par de contas compartilhado
+  por todos os usuários**, forçando disputa pelo mesmo saldo.
+- **Critério de aprovação:** taxa de erro em `/transfers` ≤ 1%
+  (`scripts/load_report.py`, que faz o job falhar caso contrário).
+
+### 9.2 Resultados (execução local, 60 s, Uvicorn com 1 worker)
+
+| Endpoint | Requisições | Falhas | Taxa de erro | Latência média | Mediana | p95 | p99 | Máx. | RPS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `/transfers` (contas próprias) | 16.482 | 0 | **0,00%** | **6,8 ms** | 6 ms | 14 ms | 19 ms | 52 ms | 278,5 |
+| `/transfers` (contas compartilhadas) | 5.497 | 0 | **0,00%** | **6,8 ms** | 6 ms | 14 ms | 18 ms | 51 ms | 92,9 |
+| `/accounts` (preparação) | 102 | 0 | 0,00% | 57,9 ms | 47 ms | 130 ms | 140 ms | 142 ms | 1,7 |
+| **Total** | **22.081** | **0** | **0,00%** | **7,1 ms** | 6 ms | 14 ms | 20 ms | 142 ms | **373,0** |
+
+### 9.3 Análise
+
+- **Sem travamento sob concorrência:** 21.979 transferências em 60 s com 50 usuários,
+  nenhuma falha, nenhum timeout e latência máxima de 52 ms em `/transfers`.
+- A serialização por lock é o gargalo teórico, mas como cada transação é curta (poucas
+  instruções em memória) o throughput (~370 req/s) é amplamente suficiente para o escopo.
+- A integridade sob concorrência é comprovada de forma determinística pelos testes de
+  integração (`test_concurrency.py`): 50 threads disputando um saldo de R$ 50,00 com
+  débitos de R$ 2,00 resultam em **exatamente 25 sucessos e 25 recusas**; transferências
+  cruzadas conservam o total; 50 requisições paralelas com a mesma `Idempotency-Key`
+  geram **uma única** transferência e **uma única** notificação anti-fraude.
+- No CI o teste roda por 30 s para manter o pipeline rápido; os CSVs ficam no artefato
+  `load-test-report` e a tabela-resumo aparece no *job summary* do GitHub Actions.
+
+## 10. Como reproduzir
+
+```bash
+pip install -r requirements-dev.txt
+make lint                 # análise estática
+make coverage-gate        # testes + relatórios em reports/ + gate
+uvicorn src.main:app      # em outro terminal
+make load                 # teste de carga (50 usuários, 60 s)
+```
