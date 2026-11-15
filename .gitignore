@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Ferramentas
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+reports/
+htmlcov/
+
+# Ambiente
+.env
+*.db
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Material de apoio local (não versionar)
+_apoio/
